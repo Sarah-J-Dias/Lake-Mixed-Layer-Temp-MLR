@@ -22,29 +22,27 @@ We averaged the raster layers to create one measurement per timestamp and then c
 - VIF to check for multicollinearity
 
 ## Variable Selection
--Stepwise AIC
--Stepwise BIC
--Lasso
+- Stepwise AIC
+- Stepwise BIC
+- Lasso
 
 ## Feature Engineering
--Interaction Terms
--Quadratic Terms
+- Interaction Terms
+- Quadratic Terms
 
 ## Checking Model Assumptions
--Residuals vs Fitted Plot
--Q-Q plot
--Scale-Location
--Residuals-Leverage (Cook's Distance)
+- Residuals vs Fitted Plot
+- Q-Q plot
+- Scale-Location
+- Residuals-Leverage (Cook's Distance)
 
 ## Transformations and Checking for Outliers
--Anomaly transformation
--Box-Cox transformation
+- Anomaly transformation
+- Box-Cox transformation
 
 ## Final Model 
--Adjusted AIC: 71.20164 (smallest)!; Adj. R^2: 0.8027; RSE: 0.2892 (smallest)
+- Adjusted AIC: 71.20164 (smallest)!; Adj. R^2: 0.8027; RSE: 0.2892 (smallest)
 
 ## Out-of-Sample Validation
--grouped 10-fold cross-validation
--R^2 = 0.804
-
-#
+- Grouped 10-fold cross-validation
+- Validation R^2 = 0.804
