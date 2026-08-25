@@ -9,8 +9,10 @@ The dataset used was the **ERA5-Land GRIB** over the Lake Superior region (Longi
 
 **ERA5-Land GRIB Documentation and Download Link:** https://cds.climate.copernicus.eu/datasets/reanalysis-era5-land?tab=overview
 # Files
--
--
+- Slideshow_Presentation_Lake_Temp_Pred_MLR: Slideshow Presentation
+- environmental_stats_final_writeup.pdf: Write-up
+- Environmental_stats_final_project_code.RMD: Final R Code
+
 # ML PIPELINE
 ## Data Pre-processing
 We averaged the raster layers to create one measurement per timestamp and then created a final dataframe that contained one row per time step and six columns containing lake mixed-layer temperature (outcome variable) and predictor variables.
