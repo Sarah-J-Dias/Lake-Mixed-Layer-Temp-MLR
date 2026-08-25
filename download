@@ -1,0 +1,25 @@
+# --- Data (large / redistribution-restricted; download separately) ---
+*.grib
+*.grib2
+*.nc
+data/
+
+# --- R ---
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+*.Rproj
+*_cache/
+*_files/
+
+# --- R Markdown knit artifacts (the tracked PDFs are intentional exceptions) ---
+*.html
+*.knit.md
+*.utf8.md
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
