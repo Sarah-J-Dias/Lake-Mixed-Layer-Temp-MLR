@@ -5,7 +5,7 @@ Modeling winter **lake mixed-layer temperature** on Lake Superior from atmospher
 **Final model:** Adjusted R² = **0.803** · Grouped 10-fold cross-validated R² = **0.801** (RMSE 0.285 °C)
 
 > **Course:** UCLA STAT 152 — Environmental Statistics (Prof. McKinnon) · Group project
-> **My role on the team:** _led [variable selection / diagnostics / cross-validation] — **edit this line to match what you actually did**_
+> **My role on the team:** Led variable selection, diagnostics, and feature engineering
 > **Language:** R (R Markdown) · **Data:** Copernicus ERA5-Land reanalysis
 
 <p align="center">
