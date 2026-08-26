@@ -1,0 +1,435 @@
+---
+title: "Predicting Lake Mixed-Layer Temperature with Multiple Linear Regression"
+author: "Sarah Dias"
+date: "2026-05-20"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+# All packages used in this analysis, loaded once
+library(terra)      # read / handle the GRIB raster data
+library(MASS)       # stepAIC, boxcox
+library(car)        # VIF, influencePlot
+library(glmnet)     # Lasso
+library(lmtest)     # Breusch-Pagan, Durbin-Watson
+library(ggplot2)    # plots
+library(gridExtra)  # arrange plots in a grid
+library(caret)      # grouped cross-validation
+```
+
+# 1. Data Preparation
+
+## Data Loading and Pre-processing
+```{r}
+# Path to the ERA5-Land GRIB extract. Download it from the Copernicus CDS and
+# place it beside this .Rmd (see the README for the link and region/dates).
+grib_file <- "7120240a16eacaafc6ddb2d80c2b6594.grib"
+
+# Stop early with a clear message if the data file is missing.
+if (!file.exists(grib_file)) {
+  stop("GRIB file not found. Place it in the same folder as this R Markdown file.")
+}
+```
+
+## Load the GRIB file with terra
+```{r}
+r <- rast(grib_file)
+nlyr(r)
+names(r)[1:10]
+```
+The file holds five variables per timestamp: 2 m temperature, total cloud cover, lake bottom temperature, lake mixed-layer temperature, and surface solar radiation.
+
+```{r}
+terra::describe(grib_file)[31:80]
+```
+The layers repeat in this fixed order through layer 865:
+Layer 1: 2 metre temperature [C]
+Layer 2: Total cloud cover (0 - 1) [-]
+Layer 3: var10 of table 228 of center ECMWF (lake bottom temperature)
+Layer 4: var8 of table 228 of center ECMWF (lake mix-layer temperature)
+Layer 5: Surface solar radiation [W*s/m^2]
+
+## Split the stack into one raster per variable
+Based on the GRIB metadata:
+var10 of table 228 of center ECMWF = lake bottom temperature
+var8 of table 228 of center ECMWF = lake mix-layer temperature
+Source: https://gdex.ucar.edu/datasets/d633001/metadata/grib.html
+
+```{r}
+# Every 5th layer belongs to the same variable (order is fixed above).
+t2m              <- r[[seq(1, nlyr(r), by = 5)]]  # 2 m temperature
+cloud            <- r[[seq(2, nlyr(r), by = 5)]]  # total cloud cover
+lake_bottom_temp <- r[[seq(3, nlyr(r), by = 5)]]  # lake bottom temperature
+lake_mix_temp    <- r[[seq(4, nlyr(r), by = 5)]]  # lake mixed-layer temperature
+solar            <- r[[seq(5, nlyr(r), by = 5)]]  # surface solar radiation
+```
+
+## Confirm each variable has 173 layers
+```{r}
+nlyr(t2m)
+nlyr(cloud)
+nlyr(lake_bottom_temp)
+nlyr(lake_mix_temp)
+nlyr(solar)
+```
+
+## Inspect the timestamps
+```{r}
+times <- time(t2m)
+times[1:5]
+times[168:173]
+```
+Each variable has 173 timestamps: two winter dates per year (January 1 and December 1), from 1940 through January 2026.
+
+## Spatially average each layer over the region
+Each layer is a map over the Lake Superior grid, not a single value. To fit standard multiple linear regression with one observation per timestamp, average every grid cell in each layer to a single regional mean.
+
+```{r}
+# global() computes a summary statistic (here, the mean) over the whole grid.
+mean_t2m    <- global(t2m,              "mean", na.rm = TRUE)[, 1]
+mean_cloud  <- global(cloud,            "mean", na.rm = TRUE)[, 1]
+mean_bottom <- global(lake_bottom_temp, "mean", na.rm = TRUE)[, 1]
+mean_mix    <- global(lake_mix_temp,    "mean", na.rm = TRUE)[, 1]
+mean_solar  <- global(solar,            "mean", na.rm = TRUE)[, 1]
+```
+
+## Build the regression table
+One row per timestamp; columns are the response and the four predictors.
+```{r}
+model_data <- data.frame(
+  t2m              = mean_t2m,
+  cloud            = mean_cloud,
+  lake_bottom_temp = mean_bottom,
+  lake_mix_temp    = mean_mix,
+  solar            = mean_solar
+)
+head(model_data)
+summary(model_data)
+```
+
+## Check for missing values
+```{r}
+colSums(is.na(model_data))
+```
+There are no missing values.
+
+Summary of preprocessing: each raster layer was averaged across the region to one regional mean per variable per timestamp, producing a time-indexed regression table with lake mixed-layer temperature as the response and 2 m temperature, cloud cover, lake bottom temperature, and surface solar radiation as predictors.
+
+# 2. Exploratory Data Analysis
+
+## First layer of each variable
+```{r}
+par(mfrow = c(2, 3))
+plot(t2m[[1]],              main = "2m Temperature - Layer 1")
+plot(cloud[[1]],            main = "Cloud Cover - Layer 1")
+plot(lake_bottom_temp[[1]], main = "Bottom Temp - Layer 1")
+plot(lake_mix_temp[[1]],    main = "Mix-Layer Temp - Layer 1")
+plot(solar[[1]],            main = "Solar Radiation - Layer 1")
+par(mfrow = c(1, 1))
+```
+
+## Pairwise scatterplots
+```{r}
+pairs(model_data[, c("lake_mix_temp", "t2m", "cloud", "lake_bottom_temp", "solar")])
+```
+
+## Correlation matrix
+```{r}
+cor(model_data[, c("lake_mix_temp", "t2m", "cloud", "lake_bottom_temp", "solar")])
+```
+
+# 3. Model Fitting
+
+## Full model (all predictors)
+```{r}
+full_model <- lm(lake_mix_temp ~ t2m + cloud + lake_bottom_temp + solar,
+                 data = model_data)
+summary(full_model)
+```
+
+## Variable selection
+
+### Stepwise AIC (backward)
+```{r}
+step_model <- stepAIC(full_model, direction = "backward")
+summary(step_model)
+```
+
+### Stepwise AIC (forward) — cross-check
+```{r}
+null_model <- lm(lake_mix_temp ~ 1, data = model_data)
+
+step_forward <- stepAIC(
+  null_model,
+  scope     = list(lower = ~1,
+                   upper = ~ t2m + cloud + lake_bottom_temp + solar),
+  direction = "forward"
+)
+```
+
+### Stepwise BIC
+```{r}
+n <- nrow(model_data)
+step_model_bic <- stepAIC(full_model, direction = "backward", k = log(n))
+```
+
+### Lasso
+```{r}
+X <- as.matrix(model_data[, c("t2m", "cloud", "lake_bottom_temp", "solar")])
+y <- model_data$lake_mix_temp
+
+lasso_model <- cv.glmnet(X, y, alpha = 1)  # alpha = 1 is Lasso
+plot(lasso_model)
+coef(lasso_model, s = "lambda.min")  # coefficients at the best lambda
+coef(lasso_model, s = "lambda.1se")  # coefficients at the 1-SE lambda
+```
+
+Lasso keeps all four predictors — none are shrunk to zero. `solar` is very close to zero (-2.656e-07), i.e. it contributes little, which matches it being the weakest predictor under AIC/BIC.
+
+**Variable selection results:** stepwise AIC (forward and backward), BIC, and Lasso all retain the four predictors.
+
+## Multicollinearity (VIF)
+```{r}
+vif(full_model)
+```
+All VIFs are below 2, so multicollinearity is not a concern.
+
+## Testing for interactions
+
+Physically plausible interactions:
+
+1. `solar × cloud` — cloud cover blocks solar radiation, so solar's effect on lake temperature likely depends on cloudiness. Strongest candidate.
+2. `t2m × cloud` — cloud cover has an insulating effect on air temperature, so their combined effect may not be additive.
+3. `t2m × solar` — higher air temperature plus more solar radiation could compound warming.
+
+### Full two-way interaction model
+```{r}
+interaction_model <- lm(lake_mix_temp ~ (t2m + cloud + lake_bottom_temp + solar)^2,
+                        data = model_data)
+summary(interaction_model)
+
+# Compare against the additive full model.
+AIC(full_model, interaction_model)
+anova(full_model, interaction_model)
+```
+
+`t2m:lake_bottom_temp` (p = 4.56e-07) and `cloud:solar` (p = 0.0453) are significant at the 0.05 level.
+
+### Refined model with the significant interactions
+```{r}
+refined_model <- lm(lake_mix_temp ~ t2m + cloud + lake_bottom_temp + solar +
+                      t2m:lake_bottom_temp +
+                      cloud:solar,
+                    data = model_data)
+summary(refined_model)
+AIC(full_model, refined_model, interaction_model)
+```
+
+AIC drops well below the full model and adjusted R^2 rises to 0.7926.
+
+## Investigating quadratic terms
+
+### Linear vs. quadratic fits for each predictor
+```{r}
+p1 <- ggplot(model_data, aes(x = t2m, y = lake_mix_temp)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", formula = y ~ x,         aes(color = "Linear"),    se = FALSE) +
+  geom_smooth(method = "lm", formula = y ~ poly(x, 2), aes(color = "Quadratic"), se = FALSE) +
+  scale_color_manual(values = c("Linear" = "red", "Quadratic" = "blue")) +
+  labs(title = "t2m vs lake_mix_temp", color = "Fit") +
+  theme_minimal()
+
+p2 <- ggplot(model_data, aes(x = lake_bottom_temp, y = lake_mix_temp)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", formula = y ~ x,         aes(color = "Linear"),    se = FALSE) +
+  geom_smooth(method = "lm", formula = y ~ poly(x, 2), aes(color = "Quadratic"), se = FALSE) +
+  scale_color_manual(values = c("Linear" = "red", "Quadratic" = "blue")) +
+  labs(title = "lake_bottom_temp vs lake_mix_temp", color = "Fit") +
+  theme_minimal()
+
+p3 <- ggplot(model_data, aes(x = cloud, y = lake_mix_temp)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", formula = y ~ x,         aes(color = "Linear"),    se = FALSE) +
+  geom_smooth(method = "lm", formula = y ~ poly(x, 2), aes(color = "Quadratic"), se = FALSE) +
+  scale_color_manual(values = c("Linear" = "red", "Quadratic" = "blue")) +
+  labs(title = "cloud vs lake_mix_temp", color = "Fit") +
+  theme_minimal()
+
+p4 <- ggplot(model_data, aes(x = solar, y = lake_mix_temp)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", formula = y ~ x,         aes(color = "Linear"),    se = FALSE) +
+  geom_smooth(method = "lm", formula = y ~ poly(x, 2), aes(color = "Quadratic"), se = FALSE) +
+  scale_color_manual(values = c("Linear" = "red", "Quadratic" = "blue")) +
+  labs(title = "solar vs lake_mix_temp", color = "Fit") +
+  theme_minimal()
+
+grid.arrange(p1, p2, p3, p4, ncol = 2)
+```
+
+### Full quadratic model
+```{r}
+full_model_quad <- lm(lake_mix_temp ~ t2m + I(t2m^2) +
+                        cloud + I(cloud^2) +
+                        lake_bottom_temp + I(lake_bottom_temp^2) +
+                        solar + I(solar^2) +
+                        t2m:lake_bottom_temp + cloud:solar, data = model_data)
+summary(full_model_quad)
+```
+Only the quadratic term `I(t2m^2)` is significant at the 0.05 level (p = 0.0012).
+
+### Refined quadratic model
+```{r}
+refined_model_quad <- lm(lake_mix_temp ~ t2m + I(t2m^2) + cloud +
+                           lake_bottom_temp + solar + t2m:lake_bottom_temp + cloud:solar,
+                         data = model_data)
+summary(refined_model_quad)
+AIC(refined_model_quad)
+```
+
+## Checking assumptions
+
+### Diagnostic plots
+```{r}
+par(mfrow = c(2, 2))
+plot(refined_model_quad)
+par(mfrow = c(1, 1))
+```
+The diagnostics suggest the normality and constant-variance assumptions are not fully met: the Q-Q plot shows heavy tails and the scale-location plot shows some spread in the residuals. The formal tests below quantify this.
+
+### Shapiro-Wilk normality test
+```{r}
+shapiro.test(residuals(refined_model_quad))
+```
+
+### Breusch-Pagan test (constant variance)
+```{r}
+bptest(refined_model_quad)
+```
+
+### Durbin-Watson test (autocorrelation)
+```{r}
+# Autocorrelation is worth checking because the data is time-indexed.
+dwtest(refined_model_quad)
+```
+
+## Trying transformations
+
+### Anomaly (mean-centering) transformation
+A common climate-science step: subtract each variable's mean to work in anomalies.
+```{r}
+model_data$lake_mix_temp_anom    <- model_data$lake_mix_temp    - mean(model_data$lake_mix_temp)
+model_data$t2m_anom              <- model_data$t2m              - mean(model_data$t2m)
+model_data$lake_bottom_temp_anom <- model_data$lake_bottom_temp - mean(model_data$lake_bottom_temp)
+model_data$cloud_anom            <- model_data$cloud            - mean(model_data$cloud)
+model_data$solar_anom            <- model_data$solar            - mean(model_data$solar)
+```
+
+```{r}
+# Note: I(t2m_anom^2) — the square must live INSIDE I(), or the formula's
+# ^ operator would drop the quadratic term rather than square the variable.
+refined_quad_model_anom <- lm(lake_mix_temp_anom ~ t2m_anom + I(t2m_anom^2) +
+                                cloud_anom + lake_bottom_temp_anom + solar_anom +
+                                t2m_anom:lake_bottom_temp_anom +
+                                cloud_anom:solar_anom,
+                              data = model_data)
+
+summary(refined_quad_model_anom)
+par(mfrow = c(2, 2))
+plot(refined_quad_model_anom)
+par(mfrow = c(1, 1))
+```
+Centering the response and predictors only shifts the intercept in an OLS fit — the fitted values, residuals, R^2, RSE, and every residual-based diagnostic are identical to the untransformed `refined_model_quad`. So this step confirms that a mean/anomaly transformation cannot address the normality or variance issues here; a transformation of the response itself is needed instead (Box-Cox, below).
+
+### Box-Cox transformation
+```{r}
+bc <- boxcox(refined_model_quad)
+optimal_lambda <- bc$x[which.max(bc$y)]
+optimal_lambda
+
+# Apply the Box-Cox transformation to the response.
+model_data$lake_mix_temp_bc <- (model_data$lake_mix_temp^optimal_lambda - 1) / optimal_lambda
+
+model_boxcox <- lm(lake_mix_temp_bc ~ t2m + I(t2m^2) + cloud +
+                     lake_bottom_temp + solar + t2m:lake_bottom_temp + cloud:solar,
+                   data = model_data)
+
+summary(model_boxcox)
+par(mfrow = c(2, 2))
+plot(model_boxcox)
+par(mfrow = c(1, 1))
+```
+The Box-Cox fit does not meaningfully improve the diagnostics and costs interpretability, so the untransformed response is retained.
+
+## Investigating outliers
+
+### Influence plot
+```{r}
+influencePlot(refined_model_quad)
+```
+
+### Inspect the flagged observation
+```{r}
+# The influence plot flags one observation with the largest Cook's distance.
+outlier_index <- 118
+model_data[outlier_index, ]
+```
+Observation 118 is the maximum lake-bottom-temperature reading in the series and is the most influential point, so it is refit without below to check its leverage on the model.
+
+### Final model (influential observation removed)
+```{r}
+final_model <- lm(lake_mix_temp ~ t2m + I(t2m^2) + cloud +
+                    lake_bottom_temp + solar + t2m:lake_bottom_temp + cloud:solar,
+                  data = model_data[-outlier_index, ])
+summary(final_model)
+par(mfrow = c(2, 2))
+plot(final_model)
+par(mfrow = c(1, 1))
+AIC(final_model)
+```
+
+# 4. Out-of-Sample Validation
+
+## Prepare the data
+```{r}
+set.seed(8901)
+
+# Rebuild the time index and derive a year label. Each year contributes two
+# consecutive timestamps (Jan 1 and Dec 1), so integer-dividing by 2 groups them.
+model_data$time_index <- 1:173
+model_data$year       <- 1940 + (model_data$time_index - 1) %/% 2
+```
+
+```{r}
+# Verify consecutive pairs of timestamps share a year.
+head(model_data$year)
+```
+
+```{r}
+# Drop the same influential observation used for the final model.
+cv_data <- model_data[-outlier_index, ]
+```
+
+## Grouped 10-fold cross-validation
+Folds are built on `year` so the two timestamps from the same year are never split across a train/test boundary — this avoids leakage between paired observations.
+
+```{r}
+folds <- groupKFold(cv_data$year, k = 10)
+```
+
+```{r}
+train_control <- trainControl(index = folds, method = "cv")
+
+cv_model <- train(
+  lake_mix_temp ~ t2m + I(t2m^2) + cloud + lake_bottom_temp + solar +
+                  t2m:lake_bottom_temp + cloud:solar,
+  data      = cv_data,
+  method    = "lm",
+  trControl = train_control
+)
+
+print(cv_model)
+```
+
+Note on interpretation: the model structure (which interaction and quadratic terms to keep, and removing the influential observation) was chosen using the full dataset before cross-validating the fixed formula. The cross-validated R^2 is therefore a mild optimistic estimate, since it does not capture the uncertainty in model selection itself.
