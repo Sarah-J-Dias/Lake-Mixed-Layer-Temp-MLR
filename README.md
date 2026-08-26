@@ -10,7 +10,7 @@ Modeling winter **lake mixed-layer temperature** on Lake Superior from atmospher
 
 <p align="center">
   <img src="00-study-area.png" width="600" alt="Lake Superior study region"><br>
-  <em>Study region — the Lake Superior basin (Longitude −92.5 to −84.0, Latitude 46.0 to 49.2).</em>
+  <em>Study region — the Lake Superior basin (Longitude -92.5 to -84.0, Latitude 46.0 to 49.2).</em>
 </p>
 
 ---
